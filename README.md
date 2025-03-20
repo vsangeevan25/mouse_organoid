@@ -1,6 +1,6 @@
 # Ribosome profiling on mouse organoid
 
-This repository contains the code and associated files for a on ribosome profiling on mouse organoid ([https://pmc.ncbi.nlm.nih.gov/articles/PMC10795831/](#)).
+This repository contains the code and associated files for a ribosome profiling study analysis on mouse organoid ([https://pmc.ncbi.nlm.nih.gov/articles/PMC10795831/](#)).
 
 ## Repository Organization
 
@@ -42,8 +42,6 @@ When knitted to an HTML, each R Markdown (**`Rmd`**) document will display the v
 
 3. Interpretation: Creates visualizations of the data generated during the analysis phase.
 
-
-```
 ### Notes on Directory Structure and Files:
 - `codes`: This folder contains scripts specifically related to the processing of the raw data (adaptor removal, quality control, trimming, UMI_extraction, rtRNA removal, different types of alignment- genome, transcriptome, CDS, or UTR specific, and finally analysis and generation of figures.
 - `dataframe`: Contains data files that are used for the respective figures, matching the data used in the analysis scripts.
