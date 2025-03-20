@@ -1,0 +1,847 @@
+---
+title: "seqdata_processing_organoid_2022"
+output: 
+  html_document:
+    df_print: paged
+author: "Sangeev"
+date: "`r Sys.time()`"
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r}
+# Prevent printing of warnings and such in the HTML
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = "center", eval = FALSE)
+```
+
+##Barcodes with adapter sequence
+```{bash}
+echo ">wt1
+ATCGTAGATCGGAAGAGCACACGTCTGAACTCCAGTCA
+>mut1
+AGCTAAGATCGGAAGAGCACACGTCTGAACTCCAGTCA
+>wt2
+CGTAAAGATCGGAAGAGCACACGTCTGAACTCCAGTCA
+>mut2
+CTAGAAGATCGGAAGAGCACACGTCTGAACTCCAGTCA
+>wt3
+GATCAAGATCGGAAGAGCACACGTCTGAACTCCAGTCA
+>mut3
+GCATAAGATCGGAAGAGCACACGTCTGAACTCCAGTCA" > /data2/sangeev/2022_organoid/seqdata/barcodes_adapters.fa
+```
+
+Apparently you can do it at one shot-Demultiplexing and adapter removal of our data
+
+specifying a minimum length of 18 here. Not specifying a minimum length allows zero length reads (or reads <= 9nt, which become 0 after UMI extraction) to pass into the output files, which then upsets downstream programs. 19 = 10nt read + 9 UMI, 9 UMI is the total of the 5' and 3' UMI bases.
+```{bash}
+cutadapt --minimum-length 19 -j 32 -a file:/data2/sangeev/2022_organoid/seqdata/barcodes_adapters.fa -o /data2/sangeev/2022_organoid/seqdata/2-adapter_removed_demux/{name}.fq.gz /data2/sangeev/2022_organoid/seqdata/1-original/30-771731655/00_fastq/Resub-org_R1_001.fastq.gz 1>/data2/sangeev/2022_organoid/reports/cutadapt_report.txt 
+```
+
+#I am doing this in July2023, when i realized that the riboseq part of this experiment did not work, and as such the data might look more of RNAseq, and I need paired end reads. 
+```{bash}
+cutadapt --minimum-length 19 -j 32 -a file:/data2/sangeev/2022_organoid/seqdata/barcodes_adapters_rev.fa -o /data2/sangeev/2022_organoid/seqdata/2-adapter_removed_demux/{name}_R2.fq.gz /data2/sangeev/2022_organoid/seqdata/original/30-771731655/00_fastq/Resub-org_R2_001.fastq.gz 1>/data2/sangeev/2022_organoid/reports/cutadapt_report_R2.txt 
+```
+
+make a graph from cutadapt files. 
+```{r}
+library(tidyverse)
+cd <- read_lines("../reports/cutadapt_report.txt") %>% 
+  str_remove_all("===") %>% 
+  str_trim()
+
+reads.per.sample <- data.frame(
+  sample = cd[grepl("Adapter", cd)] %>% str_remove("Adapter "),
+  seq = cd[grepl("Sequence:", cd)] %>% str_extract("[AGCT]+;") %>% str_remove(";"),
+  count= cd[grepl("Trimmed", cd)] %>% str_extract("Trimmed: [0-9]+ times") %>% str_extract("[0-9]+")
+) %>% 
+  type_convert()
+
+reads.per.sample %>% 
+  ggplot(., aes(sample, count, label = round(count/1e6, 2)))+
+  geom_col()+
+  geom_text(vjust = 2, color = "white")+
+  scale_y_continuous(labels = scales::label_number_si())
+```
+#check the folder
+
+```{bash}
+for file in ../seqdata/2-adapter_removed_demux/*.gz; do
+  echo $file
+done
+```
+
+
+Use the 5nt 3' UMI and 4nt 5' UMI as a UMI, extract each of them, using forking to parallelize (& sign)
+```{bash} 
+for file in ../seqdata/2-adapter_removed_demux/*.gz; do
+  if [[ $file == *"unknown"* ]]; then
+    continue
+  fi
+  
+  fname=`basename $file | cut -d '.' -f 1`
+  
+  mkdir -p ../reports/$fname
+  
+  output=../seqdata/3-umi_extracted/`basename $file`
+  
+  logfile=../reports/$fname/$fname\_step_umitools_extract.txt
+  
+  umi_tools extract --stdin=$file --extract-method=regex --bc-pattern='^(?P<umi_1>.{4}).+(?P<umi_2>.{5})' --log=$logfile --stdout=$output &
+done
+```
+
+#check the folder
+
+```{bash}
+for file in ../seqdata/3-umi_extracted/*.gz; do
+  echo $file
+done
+```
+#check the folder for the rtrna indices (made by John)
+
+```{bash}
+for file in /data2/sangeev/2022_organoid/alignment/hisat2/indices/rtrna_from_trans*; do
+  echo $file
+done
+
+```
+
+##### rtRNA depletion using rtrna indices from transcriptome
+
+ 
+```{bash}
+
+for file in ../seqdata/3-umi_extracted/*; do
+  index=../alignment/hisat2/indices/rtrna_from_trans
+  
+  un=../seqdata/4_rtrna_depleted/`basename $file`
+  
+  # don't need it
+  samfile=/dev/null
+  
+  hisat2 -x $index --un-gz $un -p 2 -S $samfile -U $file  &
+done
+
+```
+
+How many reads did I have before and after depletion?
+```{bash}
+echo "filename reads_pre_rrna_removal reads_after_rrna_removal" > ../data_frames/reads_lost_to_rrna.txt
+
+for file in ../seqdata/3-umi_extracted/*; do
+  filename=`basename $file`
+  
+  # this counts the lines in each file and divides by 4 and reports those numbers to a file
+  echo `basename $file | cut -d "." -f 1` $((`zcat $file | wc -l` / 4)) $((`zcat ../seqdata/4_rtrna_depleted/$filename | wc -l` / 4))  >> ../data_frames/reads_lost_to_rrna.txt &
+done
+```
+
+Looking good. 
+```{r fig.width = 4, fig.height = 4, eval = TRUE}
+library(tidyverse)
+
+read_delim("../data_frames/reads_lost_to_rrna.txt", delim = " ") %>% 
+  pivot_longer(cols = where(is.numeric)) %>% 
+  ggplot(., aes(filename, value, fill = name))+
+  geom_col(position = "identity")+
+  coord_flip()+
+  theme_bw()+
+  theme(panel.grid = element_blank(),
+        text = element_text(size= 15),
+        legend.position = "top")+
+  labs(x = NULL,
+       y = "Number of reads",
+       title = "Reads lost to in silico rRNA/tRNA depletion")+
+  scale_fill_manual(values = c("grey30", "grey70"), name = NULL, labels = c("Post-depletion", "Pre-depletion"))+
+  scale_y_continuous(labels = scales::label_number_si())
+
+ggsave(plot = last_plot(), filename = "../figures/reads_lost_to_depletion.pdf", width = 6, height = 4)
+
+```
+### fastQC
+
+Use fastqc so there's some amount of per sample quality report in the multiqc report. I think fastQCs ram limit is threads*250mb with no way to set ram on its own, so just asking for more threads seems to prevent it from crashing even if it's not using that many threads. Again, forks for parallelization. 
+```{bash}   
+for file in ../seqdata/4_rtrna_depleted/*.gz; do
+  outdir=../reports/`basename $file | cut -d '.' -f 1`
+  
+  mkdir -p $outdir
+  
+  /data/john/software/FastQC/fastqc -o $outdir -t 3 $file &
+done
+
+run_multiqc(../seqdata/4_rtrna_depleted/*.gz; ../reports/, multiqc = "multiqc")
+```
+
+### fastp
+
+```{bash}
+for file in ../seqdata/4_rtrna_depleted/*.fq.gz; do
+    fname=`basename $file | cut -d '.' -f 1`
+
+    json=../reports/$fname/fastp\.json
+    html=../reports/$fname/fastp\.html
+
+    fastp --disable_adapter_trimming -i $file -o ../seqdata/5_quality_filtered/$fname\.fq.gz -w 8 -j $json -h $html -R $fname --length_required 10
+done
+```
+
+
+### Deduplication
+
+Perform deduplication, it's highly unlikely that this will work on a personal computer, unless it has lots of ram, maybe 32 or 64Gb. I don't actually know how much ram was used during each operation. 
+```{bash}
+for file in ../seqdata/5_quality_filtered/*gz; do
+FNAME=`basename $file | cut -d "." -f 1`
+  # the name and location of the duduped file
+dedupedfile=../seqdata/6_dedup/`basename $file`
+  # the name and location of the duplicates
+dupfile=../seqdata/6_dedup/duplicates/`basename $file`
+  # the report file
+report=../reports/$FNAME/$FNAME\.dedup_txt
+  echo ----------$name---------->>$report
+  # deduplicating command
+/home/prshah/Software/pckgs/bbmap/dedupe.sh in=$file out=$dedupedfile outd=$dupfile ac=f t=16 -Xmx150G &>>$report
+done
+```
+
+### Alignment to transcriptome- all transcripts
+
+This is using the indices that John made- for mouse transcriptome. they're all the transcripts from CDS - note, they're not principal isoforms. doesnt have buffering at either end. 
+```{bash}
+for file in ../seqdata/6_dedup/*; do
+
+fname=`basename $file | cut -d "." -f 1`
+index=/data2/john/projects/multi_org_dnazyme/alignment/hisat2/indices/mouse_trans
+output=../alignment/hisat2/output_trans_jf_indices/$fname\.bam
+fz=../alignment/hisat2/output_trans_jf_indices/$fname\.fq.gz
+echo "operating on $file"
+hisat2 -k 1 -x $index -p 8 --no-unal --no-spliced-alignment --rna-strandness F --al-gz $fz -U $file | \
+samtools sort -@ 8  -O BAM | \
+tee $output | \
+samtools index - $output\.bai &
+done
+```
+
+###How many total reads before trans alignment
+```{bash}
+for FILE in ../seqdata/5_quality_filtered/*fq.gz; do
+  echo `basename $FILE | cut -d '.' -f 1` `zcat $FILE | awk 'NR%4==0' | wc -l` >> ../data_frames/reads_minus_rRNA_read_counts.txt &
+done
+```
+
+###How many total reads before rRNA depletion
+```{bash}
+for FILE in ../seqdata/3-umi_extracted/*fq.gz; do
+  echo `basename $FILE | cut -d '.' -f 1` `zcat $FILE | awk 'NR%4==0' | wc -l` >> ../data_frames/total_read_counts.txt &
+done
+```
+
+###How many total reads aligned to the transcriptome_jf indices
+```{bash}
+for FILE in ../alignment/hisat2/output_trans_jf_indices/*fq.gz; do
+  echo `basename $FILE | cut -d '.' -f 1` `zcat $FILE | awk 'NR%4==0' | wc -l` >> ../data_frames/trans_aligned_jf_indices.txt &
+done
+```
+
+##plot the graph to compare the mapping rate
+```{r fig.width=6, fig.height=2}
+p.rr <- bind_rows(
+  "total_reads" = read_table("../data_frames/total_read_counts.txt", col_names = FALSE),
+  "after_rRNA_depletion" = read_table("../data_frames/reads_minus_rRNA_read_counts.txt", col_names = FALSE),
+  "cDNA_jf_indices" = read_table("../data_frames/trans_aligned_jf_indices.txt", col_names = FALSE),
+  .id = "sample") 
+
+p.rr %>% 
+  ggplot(., aes(X1, X2, fill = sample, label = paste(round(X2/1e6,2), "M")))+
+  geom_col(position = "dodge")+
+  theme_bw()+
+  theme(text = element_text(size = 18),
+        panel.grid.minor = element_blank())+
+  labs(x = NULL,
+       y = "Reads")+
+  scale_fill_manual(name = NULL, values = c("indianred", "steelblue", "forestgreen"))+
+  scale_y_continuous(labels = label_number_si())+
+  geom_text(position = position_dodge(width = .9), vjust = -.1)
+
+
+ggsave(plot = last_plot(), filename = "../figures/comp_reads_mapping_to_transcriptome.pdf", width = 8, height = 4)
+```
+
+#for the sake of completenes, I would also have the genome alignment
+
+Run alignment, this uses tee to duplicate the output stream so that the sam can be converted to bam and indexed at the same time. Works perfectly fine
+
+```{bash}
+for file in ../seqdata/6_dedup/*; do
+  fname=`basename $file | cut -d "." -f 1`
+  
+  index=/data2/john/projects/multi_org_dnazyme/alignment/hisat2/indices/mouse_genome
+  
+  output=../alignment/hisat2/output_genome/`basename $file | cut -d "." -f 1`_all.bam
+  
+  summaryfile=../reports/$fname/$fname\_hisat_aligned.txt
+  
+  fz=../alignment/hisat2/output_genome/$fname\.fq.gz
+  
+  echo "operating on $file"
+
+hisat2 -x $index -p 8 --no-unal --no-spliced-alignment --new-summary --summary-file $summaryfile -U $file | \
+  samtools sort -@ 8 -O BAM | \
+  tee  $output | \
+  samtools index -  $output\.bai 
+done
+```
+
+
+
+#well,I just took the number based on the summary report. gzip count doesnt work here. slightly more than the cDNA aligned reads (JF indices)
+```{r}
+df2 <- read_table("../data_frames/reads_aligned_genome.txt", col_names = c('samp', "counts"))
+
+df2 %>% 
+  ggplot(., aes(samp, counts))+
+  geom_col(position = "dodge")+
+  coord_flip()+
+  scale_y_continuous(labels = scales::label_number_si(accuracy = .1))
+```
+## I want to check the UTR mapping as well. So, based on FASTA and annotation files prepared for RiboViz (/data/riboseq/Supp/seqs/mouse/vm14_current/utr cds seq.RMD)- Make the indices. i've copied the files to my directory. 
+
+Make an index for the mouse cds and rRNA/tRNA
+```{bash}
+for file in ../fastas/*; do
+  iname=../alignment/hisat2/indices/`basename $file | cut -d '.' -f 1`  
+  
+  hisat2-build $file $iname
+done
+```
+
+
+### for cds only- Alignment
+```{bash}
+for file in ../seqdata/6_dedup/*; do
+
+fname=`basename $file | cut -d "." -f 1`
+index=../alignment/hisat2/indices/mouse_appris_onlycds
+output=../alignment/hisat2/output_cds/$fname\.bam
+fz=../alignment/hisat2/output_cds/$fname\.fq.gz
+echo "operating on $file"
+hisat2 -k 1 -x $index -p 8 --no-unal --no-spliced-alignment --rna-strandness F --al-gz $fz -U $file | \
+samtools sort -@ 8  -O BAM | \
+tee $output | \
+samtools index - $output\.bai &
+done
+```
+
+### for utr5- alignment
+```{bash}
+for file in ../seqdata/6_dedup/*; do
+
+fname=`basename $file | cut -d "." -f 1`
+index=../alignment/hisat2/indices/mouse_appris_utr5
+output=../alignment/hisat2/output_utr5/$fname\.bam
+fz=../alignment/hisat2/output_utr5/$fname\.fq.gz
+echo "operating on $file"
+hisat2 -k 1 -x $index -p 8 --no-unal --no-spliced-alignment --rna-strandness F --al-gz $fz -U $file | \
+samtools sort -@ 8  -O BAM | \
+tee $output | \
+samtools index - $output\.bai &
+done
+```
+
+### for utr3- alignment
+```{bash}
+for file in ../seqdata/6_dedup/*; do
+
+fname=`basename $file | cut -d "." -f 1`
+index=../alignment/hisat2/indices/mouse_appris_utr3
+output=../alignment/hisat2/output_utr3/$fname\.bam
+fz=../alignment/hisat2/output_utr3/$fname\.fq.gz
+echo "operating on $file"
+hisat2 -k 1 -x $index -p 8 --no-unal --no-spliced-alignment --rna-strandness F --al-gz $fz -U $file | \
+samtools sort -@ 8  -O BAM | \
+tee $output | \
+samtools index - $output\.bai &
+done
+```
+
+
+###How many total reads cds aligned
+```{bash}
+for FILE in ../alignment/hisat2/output_cds/*fq.gz; do
+  echo `basename $FILE | cut -d '.' -f 1` `zcat $FILE | awk 'NR%4==0' | wc -l` >> ../data_frames/cds_aligned.txt &
+done
+```
+
+###How many total reads utr5 aligned
+```{bash}
+for FILE in ../alignment/hisat2/output_utr5/*fq.gz; do
+  echo `basename $FILE | cut -d '.' -f 1` `zcat $FILE | awk 'NR%4==0' | wc -l` >> ../data_frames/utr5_aligned.txt &
+done
+```
+
+
+###How many total reads utr3 aligned
+```{bash}
+for FILE in ../alignment/hisat2/output_utr3/*fq.gz; do
+  echo `basename $FILE | cut -d '.' -f 1` `zcat $FILE | awk 'NR%4==0' | wc -l` >> ../data_frames/utr3_aligned.txt &
+done
+```
+
+#Comparison
+
+```{r}
+library(tidyverse)
+library(scales)
+library(patchwork)
+```
+
+
+###a lot of the reads map to the CDS compared to the UTRs- which is good. 
+```{r fig.width=6, fig.height=2}
+trans_reads_map <- bind_rows(
+  "CDS_reads" = read_table("../data_frames/cds_aligned.txt", col_names = FALSE),
+  "UTR5_reads" = read_table("../data_frames/utr5_aligned.txt", col_names = FALSE),
+  "UTR3_reads" = read_table("../data_frames/utr3_aligned.txt", col_names = FALSE),
+  .id = "sample") 
+
+trans_reads_map$sample <- factor(trans_reads_map$sample, levels= c("CDS_reads", "UTR3_reads", "UTR5_reads"))
+
+a <- trans_reads_map %>% 
+  ggplot(., aes(X1, X2, fill = sample, label = paste(round(X2/1e6,2), "M")))+
+  geom_col(position = "dodge")+
+  theme_bw()+
+  theme(panel.grid = element_blank(),
+        text = element_text(size = 14),
+        axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(title = "principal isoform mapping",
+    x = NULL,
+       y = "Reads")+
+  scale_fill_manual(name = NULL, values = c("indianred", "steelblue", "forestgreen"))+
+  scale_y_continuous()
+
+all_reads_map <- bind_rows(
+   "total_reads" = read_table("../data_frames/total_read_counts.txt", col_names = FALSE),
+  "after_rRNA_depletion" = read_table("../data_frames/reads_minus_rRNA_read_counts.txt", col_names = FALSE),
+  "after_dedup"= read_table("../data_frames/dedup.txt", col_names = FALSE),
+  "CDS_reads" = read_table("../data_frames/cds_aligned.txt", col_names = FALSE),
+  "genome_aligned" = read_table("../data_frames/reads_aligned_genome.txt", col_names = FALSE),
+  .id = "sample") 
+
+
+all_reads_map$sample <- factor(all_reads_map$sample, levels= c("total_reads", "after_rRNA_depletion", "after_dedup", "genome_aligned", "CDS_reads"))
+
+
+b <- all_reads_map %>% 
+  ggplot(., aes(X1, X2, fill = sample, label = paste(round(X2/1e6,2), "M")))+
+  geom_col(position = "dodge")+
+  theme_bw()+
+  theme(panel.grid = element_blank(),
+        text = element_text(size = 14),
+        axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(title = "read_counts_per_step",
+    x = NULL,
+       y = "Reads")+
+  scale_y_continuous()
+
+c <- all_reads_map %>% 
+  ggplot(., aes(X1, X2, fill = sample, label = paste(round(X2/1e6,2), "M")))+
+  geom_col(position = "dodge")+
+  theme_bw()+
+  theme(panel.grid = element_blank(),
+        text = element_text(size = 14),
+        axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(title = "read_counts_per_step", 
+    x = NULL,
+       y = "Reads")+
+  scale_y_continuous()+
+  coord_cartesian(ylim = c(0,18e6))
+
+a 
+b
+c
+
+b/c + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+
+ggsave(plot = last_plot(), filename = "../figures/read_counts_per_step.pdf", width = 14, height = 8)
+
+```
+
+```{r}
+my_labeller <- c("mut1" = "KO1",
+                 "mut2" = "KO2",
+                 "mut3" = "KO3",
+                 "wt1" = "CTRL1",
+                 "wt2" = "CTRL2",
+                 "wt3" = "CTRL3")
+
+trans_reads_map2 <- trans_reads_map %>%
+  mutate(X1 = factor(X1, levels = c("wt1", "wt2", "wt3", "mut1", "mut2", "mut3"))) %>%
+  mutate(X1 = forcats::fct_recode(X1, !!!my_labeller)) %>%
+  group_by(X1) %>%
+  mutate(prop = X2 / sum(X2))
+  
+
+# Create the plot
+ggplot(trans_reads_map2, aes(x = sample, y = prop, fill = sample)) +
+  geom_col(position = "stack") +
+  theme_bw() +
+  theme(axis.text.x = element_blank()) +
+  labs(x = NULL, y = "Proportion of reads") +
+  scale_fill_manual(values = c("indianred", "steelblue", "forestgreen"), name = NULL, 
+                    labels= c("CDS", "3' UTR", "5' UTR")) +
+#  guides(fill = "none") + # Remove legend
+  scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~ X1, labeller = labeller(X1 = my_labeller))
+
+ggsave(plot = last_plot(),filename = "/data2/sangeev/2022_organoid/figures/read_proportion2.pdf", dpi = 600, width = 7, height =5)
+```
+
+```{r}
+#so this CDS mapping is based on principal isoform mapping. Note, that however, we are using all transcripts mapping for further analysis. I will use that specific data for publication. 
+
+all_reads_map %>% filter(sample %in% c("after_dedup", "CDS_reads", "genome_aligned")) %>%
+  ggplot(., aes(X1, X2, fill = sample, label = paste(round(X2/1e6,2), "M")))+
+   geom_col(position = "stack") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "read_counts_per_step",
+    x = NULL,
+       y = "Reads")+
+  scale_y_continuous(breaks= c(0, 2e6, 5e6, 1e7, 2e7, 3e7), labels = c("0", "2M", "5M", "10M", "20M", "30M")) +
+  scale_x_discrete(labels = c("KO1", "KO2", "KO3", "CTRL1", "CTRL2", "CTRL3")) +
+   scale_fill_manual(values = c("#9ecae1", "#6baed6", "#3182bd"),  name = NULL,  labels = c("Total reads", "Genome aligned", "CDS aligned"))
+
+
+```
+
+```{r}
+#so the previous one is CDS mapping is based on principal isoform mapping. Note, that however, we are using all transcripts mapping for further analysis. I will use that specific data for publication. 
+library(tidyverse)
+
+df <- data.frame(
+  sample = c("Transcripts aligned", "Transcripts aligned", "Transcripts aligned", "Transcripts aligned", "Transcripts aligned", "Transcripts aligned"),
+  X1 = c("mut1", "mut2", "mut3", "wt1", "wt2", "wt3"),
+  X2 = c(4199250, 3283798, 3737199, 6381011, 5993855, 2959654)
+)
+
+b <- all_reads_map %>% 
+  filter(sample!="CDS_reads") %>%
+  bind_rows(., df) 
+
+b$X1 = factor(b$X1 , levels = c("wt1", "wt2", "wt3", "mut1", "mut2", "mut3"))
+
+b %>% filter(sample %in% c("after_dedup", "genome_aligned", "Transcripts aligned")) %>%
+  ggplot(., aes(X1, X2, fill = sample, label = paste(round(X2/1e6,2), "M")))+
+   geom_col(position = "stack") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    x = NULL,
+       y = "Total reads")+
+  scale_y_continuous(breaks= c(0, 2e6, 5e6, 1e7, 2e7, 3e7), labels = c("0", "2M", "5M", "10M", "20M", "30M")) +
+  scale_x_discrete(labels = c("CTRL1", "CTRL2", "CTRL3", "KO1", "KO2", "KO3")) +
+   scale_fill_manual(values = c("#9ecae1", "#6baed6", "#3182bd"),  name = NULL,  labels = c("Total reads after deduplication", "Genome aligned", "Transcripts aligned"))
+
+
+b %>%
+  filter(sample == "Transcripts aligned") %>%
+  ggplot(aes(x = X1, y = X2, fill = sample, label = paste(round(X2 / 1e6, 2), "M"))) +
+  geom_col(position = "stack",  fill = "#4C72B0") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = NULL, y = "Total reads aligned to all transcripts") +
+  scale_y_continuous(breaks = c(0, 2e6, 4e6, 6e6), labels = c("0", "2M", "4M", "6M")) +
+  scale_x_discrete(labels = c("CTRL1", "CTRL2", "CTRL3", "KO1", "KO2", "KO3")) +
+  guides(fill = FALSE)
+
+
+ggsave(plot = last_plot(),filename = "/data2/sangeev/2022_organoid/figures/total_read_count.pdf", dpi = 600, width = 6, height =3)
+
+ggsave(plot = last_plot(),filename = "/data2/sangeev/2022_organoid/figures/total_read_count2.pdf", dpi = 600, width = 4, height =4)
+```
+
+
+### Read lengths of aligned reads. This is an important step to know whether the library prep worked or not. 
+
+```{r}
+library(GenomicAlignments)
+library(tidyverse)
+library(parallel)
+
+bam.locs <- dir("../alignment/hisat2/output_trans_jf_indices/", full.names = TRUE, pattern = "bam$")
+
+names(bam.locs) <- bam.locs %>% 
+  str_remove("../alignment/hisat2/output_trans_jf_indices//") %>% 
+  str_remove(".bam")
+```
+
+Read them in and convert to data frames
+```{r}
+bam.list <- mclapply(bam.locs, function(x) {
+  # get only primary reads
+  flag <-
+    scanBamFlag(
+      isUnmappedQuery = FALSE,
+      isSecondaryAlignment = FALSE,
+      isSupplementaryAlignment = FALSE
+    )
+  
+  # make the param object
+  p <- ScanBamParam(flag = flag)
+  
+  # the indices are here
+  idx <- paste0(x, ".bai")
+  
+  # read in the bam
+  as_tibble(readGAlignments(x, index = idx, param = p))
+}, mc.cores = length(bam.locs))
+```
+#seems like the library prep did not work. specifically- the nuclease digestion step did not work. confirm this by looking into the 3nt periodicity. 
+```{r fig.width = 6, fig.height = 3}
+rl <- lapply(bam.list, function(x){
+  x %>% 
+    group_by(qwidth) %>% 
+    tally() %>% 
+    ungroup()
+}) %>% 
+  bind_rows(.id = "sample")
+
+rl %>% 
+  group_by(sample) %>% 
+  mutate(prop = n / sum(n)) %>% 
+  ungroup() %>% 
+  ggplot(., aes(qwidth, prop))+
+  geom_col(width = 1)+
+  facet_wrap(~sample, ncol = 4, scales = "free")+
+  theme_bw()+
+  theme(panel.grid = element_blank(),
+        text = element_text(size = 13))+
+   facet_wrap(~ sample, labeller = labeller(sample = my_labeller))+
+  labs(x = "Read length", y = "Proportion of reads")
+
+ggsave(plot = last_plot(), filename = "../figures/read_lengths.pdf", width = 8, height = 4)
+```
+
+###Featurecount- using genome aligned reads
+```{bash}
+for file in ../alignment/hisat2/output_genome/*bam; do
+  fname=`basename $file | cut -d "." -f 1`
+  
+ gff=/data2/sangeev/2021_organoid/gffs/mouse.gff.gz
+ out=../data_frames/featurescounts_$fname.tsv
+ in=../alignment/hisat2/output_genome/$fname.bam
+
+  /data/john/software/subread-2.0.3-Linux-x86_64/bin/featureCounts \
+    -t gene -g ID -T 4 -d 10 -s 1 --extraAttributes gene,gene_biotype \
+    --primary --fraction -a $gff \
+    -o $out \
+    $in &
+    done
+
+```
+
+```{r fig.width = 13, fig.height = 9}
+fcs.locs2 <- dir("../data_frames", pattern = "summary", full.names = TRUE)
+
+names(fcs.locs2) <- fcs.locs2 %>% 
+  str_remove("../data_frames/") %>% 
+  str_remove("featurescounts_") %>%  str_remove("_all.tsv.summary")
+
+fcs.df <- lapply(fcs.locs2,  skip = 1, read_table, col_names = c("status", "reads")) %>% 
+  bind_rows(.id = "sample")
+
+fcs.df %>% 
+  ggplot(., aes(sample, reads))+
+  geom_col()+
+  facet_wrap(~status, scales = "free")+
+  scale_y_continuous(labels = scales::label_number_si())+
+  theme_bw()+
+  theme(text = element_text(size = 14),
+        panel.grid = element_blank())+
+  labs(x = NULL,
+       y = "Reads")+
+  coord_flip()
+```
+
+#this makes sense.quite a bit of reads ~5m mapped to the protein coding genes. FeatureCounts might not be accurate- It is an indication that most of the reads mapped to the genome are mapping to CDS, but in terms of exact count and normalization, we will have to use Kallisto. 
+```{r }
+fcg.locs <- dir("../data_frames", pattern = "all.tsv$", full.names = TRUE)
+
+names(fcg.locs) <- fcg.locs %>% 
+  str_remove("../data_frames/") %>% 
+  str_remove("featurescounts_") %>% 
+  str_remove("_all.tsv")
+
+fcg.df <- lapply(fcg.locs, function(x){
+  read_tsv(x, skip = 1) %>% 
+    dplyr::rename("counts" = 9) # count column is file name otherwise
+}) %>% 
+  bind_rows(.id = "sample")
+
+fcg.df %>% 
+  mutate(newname = case_when(
+    gene_biotype != "protein_coding" ~ "not CDS",
+    TRUE ~ gene_biotype
+  )) %>% 
+  group_by(sample, newname) %>% 
+  summarise(total_reads = sum(counts)) %>% 
+  ungroup() %>% 
+  arrange(sample, newname) %>% 
+  ggplot(., aes(sample, total_reads, fill = newname))+
+  geom_col(position = "dodge")+
+  coord_flip()
+```
+
+#control check. This is good- but again this is without normalization. 
+```{r}
+fcg.df %>% 
+  dplyr::select(sample, gene, gene_biotype, counts) %>%
+  filter(gene=="Mettl3")
+```
+
+### I'd also do a Kallisto transcriptome alignment. The indices are made from the recent M31 all transcript fasta file. 
+
+```{bash}
+
+for file in ../seqdata/6_dedup/*; do
+  fname=`basename $file | cut -d "." -f 1`
+  
+  index=../alignment/kalisto/indices/mouse_trans.kidx
+  
+  output=../alignment/kalisto/$fname
+  
+  echo "operating on $file"
+
+kallisto quant -i $index --single -l 30 -s 2 -t 4 -o $output $file &
+done
+```
+
+
+
+
+### make a kallisto index
+```{bash}
+kallisto index -i ../alignment/kalisto/indices/mouse_cds.kidx -k 19 ../fastas/mouse_appris_onlycds.fa
+
+kallisto index -i ../alignment/kalisto/indices/mouse_utr3.kidx -k 19 ../fastas/mouse_appris_utr3.fa
+
+kallisto index -i ../alignment/kalisto/indices/mouse_utr5.kidx -k 19 ../fastas/mouse_appris_utr5.fa
+```
+
+### I'd also do a Kallisto cds alignment. The indices are made from the recent GrcM39 all CDS fasta file. 
+
+```{bash}
+
+for file in ../seqdata/6_dedup/*; do
+  fname=`basename $file | cut -d "." -f 1`
+  
+  index=../alignment/kalisto/indices/mouse_cds.kidx
+  
+  output=../seqdata/new/aligned/cds/$fname
+  
+  echo "operating on $file"
+
+kallisto quant -i $index --single -l 30 -s 2 -t 4 -o $output $file &
+done
+```
+
+### I'd also do a Kallisto utr5 alignment. The indices are made from the recent M31 all transcript fasta file. 
+
+```{bash}
+
+for file in ../seqdata/6_dedup/*; do
+  fname=`basename $file | cut -d "." -f 1`
+  
+  index=../alignment/kalisto/indices/mouse_utr5.kidx
+  
+  output=../seqdata/new/aligned/utr5/$fname
+  
+  echo "operating on $file"
+
+kallisto quant -i $index --single -l 30 -s 2 -t 4 -o $output $file &
+done
+```
+
+### I'd also do a Kallisto utr3 alignment. The indices are made from the recent M31 all transcript fasta file. 
+
+```{bash}
+
+for file in ../seqdata/6_dedup/*; do
+  fname=`basename $file | cut -d "." -f 1`
+  
+  index=../alignment/kalisto/indices/mouse_utr3.kidx
+  
+  output=../seqdata/new/aligned/utr3/$fname
+  
+  echo "operating on $file"
+
+kallisto quant -i $index --single -l 30 -s 2 -t 4 -o $output $file &
+done
+```
+
+
+```{r}
+# Create example data
+sample <- c("wt1", "wt2", "wt3", "mut1", "mut2", "mut3")
+region <- c("cds", "utr5", "utr3")
+
+# Create combinations of samples and regions
+combinations <- expand.grid("sample" = column1, "region" = column2)
+
+# Add values to the third column
+combinations$count <- c(2311129, 2147490, 1143891, 1715786, 1295731, 1423062, 235905, 223645, 125748, 158394, 137070, 148003, 1709432, 1571775, 836036, 1136496, 916610, 1044519)
+
+combinations$bases <- c(30858202,30858202,30858202,30858202,30858202,30858202,4047282,4047282,4047282,4047282,4047282,4047282,21144672,21144672,21144672,21144672,21144672,21144672)
+
+prop <- combinations %>%
+  group_by(sample) %>%
+  mutate(sum_count= sum(count)) %>%
+  mutate(prop = count / sum_count)
+  
+prop2 
+
+# Create the plot
+ggplot(prop, aes(x = sample, y = prop, fill = region)) +
+  geom_col(position = "stack") +
+  theme_bw() +
+  theme(axis.text.x = element_blank()) +
+  labs(x = NULL, y = "Proportion of reads") +
+  scale_fill_manual(values = c("indianred", "steelblue", "forestgreen"),  
+                    labels= c("CDS", "3' UTR", "5' UTR")) +
+#  guides(fill = "none") + # Remove legend
+  scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~sample)
+
+my_labeller <- c("mut1" = "KO1",
+                 "mut2" = "KO2",
+                 "mut3" = "KO3",
+                 "wt1" = "CTRL1",
+                 "wt2" = "CTRL2",
+                 "wt3" = "CTRL3")
+
+prop <- combinations %>%
+  mutate(sample = factor(sample, levels = c("wt1", "wt2", "wt3", "mut1", "mut2", "mut3"))) %>%
+  mutate(sample = forcats::fct_recode(sample, !!!my_labeller)) %>%
+  group_by(sample) %>%
+   mutate(sum_count= sum(count)) 
+  
+
+# Create the plot
+ggplot(prop, aes(x = region, y = prop, fill = region)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  theme_bw() +
+  labs(x = NULL, y = "Proportion of reads") +
+  scale_fill_manual(values = c("indianred", "steelblue", "forestgreen"), 
+                    name = NULL, labels = c("CDS", "5' UTR", "3' UTR")) +
+  scale_y_continuous(limits= c(0,0.6), labels = scales::percent) +
+  facet_wrap(~ sample, labeller = labeller(sample = my_labeller))
+
+```
+

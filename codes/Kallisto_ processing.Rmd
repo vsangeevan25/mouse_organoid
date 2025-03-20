@@ -1,0 +1,268 @@
+---
+title: "Kallisto_ processing"
+output: 
+  html_document:
+    df_print: paged
+author: "Sangeev"
+date: "`r Sys.time()`"
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r}
+# Prevent printing of warnings and such in the HTML
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = "center", eval = FALSE)
+```
+
+---
+```{r}
+library(tidyverse)
+library(rtracklayer)
+library(scales)
+library(patchwork)
+```
+
+## Read in Kallisto output 
+```{r}
+file.loc <- list.files(path = "../alignment/kalisto/output/", 
+                       pattern = "tsv",
+                       full.names = TRUE,
+                       recursive = TRUE)
+file.loc
+
+kallisto_data <- sapply(file.loc, read_tsv, simplify = FALSE) %>% # Read in multiple kallisto files
+  bind_rows(.id = "sample") # Join them into a single tibble
+
+kallisto_data <- kallisto_data %>%
+  separate(sample, into = letters[1:6], sep = "/") %>% # Separate the file name to get sample name
+  dplyr::select(f, target_id, est_counts, tpm, eff_length, length) # Keep only these 3 columns for subsequent analysis
+```
+##clean up the data_frame and save it. we have transcript specific count in this table. 
+```{r}
+kallisto_clean <- kallisto_data %>% 
+  separate(target_id, into = letters[1:2], sep = "\\|") %>%
+  dplyr::rename("gene_id"="b") %>% 
+  dplyr::rename("sample"="f") %>% 
+  dplyr::rename("transcript"="a")
+
+write_csv(kallisto_clean, "../data_frames/kallisto_data_clean.csv")
+
+kallisto_clean <- read_csv("../data_frames/kallisto_data_clean.csv")
+```
+
+##sanity check. looks good.
+```{r}
+kallisto_clean[5] %>% colSums(na.rm = T)
+```
+##sanity check on the mut and wt gene count- by gene and transcript. mut1, mut3 and wt 1 and wt2 look good for further analysis- involving DeSeq2 and etc. 
+```{r}
+kallisto_clean %>% 
+  filter(gene_id=="ENSMUSG00000022160.19") %>%
+  group_by(sample, gene_id) %>% 
+  summarise(sum_tpm=sum(tpm)) 
+
+kallisto_clean %>% 
+  filter(gene_id=="ENSMUSG00000022160.19") %>%
+  group_by(sample, transcript) %>% 
+  summarise(sum_tpm=sum(tpm)) 
+```
+#transcript count for mettl3 gene
+```{r}
+kallisto_clean %>% 
+  filter(gene_id == "ENSMUSG00000022160.19") %>% 
+   group_by(sample, transcript) %>% 
+  summarise(sum_tpm=sum(tpm)) %>%
+  ggplot(., aes(transcript, sum_tpm))+
+  geom_col() +
+  coord_flip() +
+  facet_grid(~sample)
+```
+
+```{r}
+##total reads counts is similar but lesser than what featurecount provided. this is more stringent than featurecount. looks realible. We will use this for further analysis.
+
+kallisto_clean %>% 
+  #filter(gene_id=="ENSMUSG00000022160.19") %>%
+  group_by(sample, gene_id) %>% 
+  summarise(sum_est_counts=sum(est_counts)) %>%
+  tally(sum_est_counts) %>%
+  ggplot(., aes(sample, n))+
+  labs(x = "Sample",
+       y = "Est_counts", 
+      title="All Transcripts_Kallisto Mapping") +
+  geom_col() 
+
+#for this particular gene-mettl3
+kallisto_clean %>% 
+  filter(gene_id=="ENSMUSG00000022160.19") %>%
+  group_by(sample, gene_id) %>% 
+  summarise(sum_tpm=sum(tpm)) %>%
+  ggplot(., aes(sample, sum_tpm))+
+  geom_col()  
+  
+ggsave(plot = last_plot(), filename = "../figures/tpm_for_mettl3.pdf", width = 6, height = 3)
+```
+ 
+```{r}
+# I will share this file with Charles. This has estimated counts for all the transcripts
+
+est_counts <- kallisto_clean %>%
+  dplyr::select(sample, transcript, gene_id, est_counts)
+
+group_by(sample) %>% 
+summarise(est_counts=sum(est_counts))
+
+write_csv(est_counts, "../data_frames/est_counts.csv")
+
+#this file has TPMs of all transcripts
+
+tpm_all_transcript <- kallisto_clean %>%
+  dplyr::select(sample, transcript, gene_id, tpm)
+
+write_csv(tpm_all_transcript, "../data_frames/tpm_all_transcript.csv")
+
+#this file has TPMs by gene ID
+tpm_by_gene_id <- kallisto_clean %>%
+  group_by(sample, gene_id) %>% 
+  summarise(tpm=sum(tpm)) 
+
+write_csv(tpm_by_gene_id, "../data_frames/tpm_by_gene_id.csv")
+
+est_counts
+tpm_all_transcript
+tpm_by_gene_id
+```
+
+### genes with zero reads
+
+```{r}
+kallisto_clean %>% 
+group_by(sample, gene_id) %>% 
+summarise(new_count=sum(est_counts)) %>%
+ungroup() %>%
+mutate(rc = round(new_count),
+         is_zero = rc == 0) %>% 
+  group_by(sample, is_zero) %>% 
+  tally() %>% 
+  ungroup() %>% 
+  ggplot(., aes(sample, n, fill = is_zero))+
+  geom_col(position = "dodge")+
+  scale_y_continuous(labels = label_number_si())+
+  theme_bw()+
+  theme(panel.grid = element_blank(),
+        text = element_text(size = 14),
+        axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_fill_discrete(name = NULL, labels = c("Zero counts", "Non-zero counts"))+
+  labs(x = NULL,
+       y = "Number of genes")
+```
+### Read count distributions
+
+```{r}
+kallisto_clean %>% 
+  group_by(sample, gene_id) %>% 
+  summarise(new_count=sum(est_counts)) %>%
+  ungroup() %>%
+  mutate(Replicate = str_sub(sample, start = -1),
+         sample = str_sub(sample, end = -2)) %>% 
+  ggplot(., aes(sample, new_count, fill = Replicate))+
+  geom_boxplot(outlier.size = .5)+
+  scale_y_log10(labels = trans_format("log10", math_format(10 ^ .x)))+
+  theme_bw()+
+  theme(text = element_text(size = 13),
+        panel.grid = element_blank(),
+        axis.text.x = element_text(angle = 20, hjust = 1))+
+  labs(x = NULL,
+       y = "Reads per gene")
+```
+
+```{r}
+library(ggpubr)
+library(scales)
+```
+
+### TPM correlations between genes
+
+```{r}
+cor.mat <- kallisto_clean %>%
+  group_by(sample, gene_id) %>% 
+  summarise(tpm=sum(tpm)) %>%
+  ungroup() %>%
+  mutate(tpm = ifelse(tpm == 0, NA, log10(tpm))) %>%
+  pivot_wider(names_from = sample, values_from = tpm) %>%
+  select("mut1", "mut2", everything(), -gene_id) %>%
+  cor(use = "pairwise.complete.obs")
+
+# remove the lower half of redundancy
+cor.mat[upper.tri(cor.mat)] <- NA
+
+cors.tpm <- cor.mat %>%
+  as_tibble(rownames = "s1") %>%
+  pivot_longer(where(is.numeric), names_to = "s2", values_to = "R") %>%
+  filter(s1 != s2 & !is.na(R))
+
+cors.tpm
+```
+
+```{r}
+p.cors.tpm <- cors.tpm %>% 
+  ggplot(., aes(s1, s2, fill = R))+
+  geom_tile()+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))+
+  theme(text = element_text(size = 13),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(color = "black", linetype = 3, size = .2))+
+  labs(x = NULL,
+       y = NULL)+
+  scale_fill_viridis_c(option = "B")
+
+p.cors.tpm
+```
+
+### Correlations between read counts
+
+```{r}
+cor.counts <- kallisto_clean %>%
+  group_by(sample, gene_id) %>% 
+  summarise(est_counts=sum(est_counts)) %>%
+  ungroup() %>%
+  mutate(est_counts = ifelse(est_counts == 0, NA, log10(est_counts))) %>%
+  pivot_wider(names_from = sample, values_from = est_counts) %>%
+  select("mut1", "mut2", everything(), -gene_id) %>%
+  cor(use = "pairwise.complete.obs")
+
+# remove the lower half of redundancy
+cor.counts[upper.tri(cor.counts)] <- NA
+
+cors.counts_new <- cor.counts %>%
+  as_tibble(rownames = "s1") %>%
+  pivot_longer(where(is.numeric), names_to = "s2", values_to = "R") %>%
+  filter(s1 != s2 & !is.na(R))
+
+cors.counts_new
+```
+
+Plot it
+```{r }
+p.cors.counts_new<- cors.counts_new %>% 
+  ggplot(., aes(s1, s2, fill = R))+
+  geom_tile()+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))+
+  theme(text = element_text(size = 13),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(color = "black", linetype = 3, size = .2))+
+  labs(x = NULL,
+       y = NULL)+
+  scale_fill_viridis_c(option = "B")
+
+p.cors.counts_new
+```
+

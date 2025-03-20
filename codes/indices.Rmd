@@ -1,0 +1,55 @@
+---
+title: "Making indices- mouse genome"
+output: 
+  html_document:
+    df_print: paged
+author: "Sangeev"
+date: "`r Sys.time()`"
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r}
+# Prevent printing of warnings and such in the HTML
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = "center", eval = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(GenomicAlignments)
+library(Biostrings)
+library(GenomicRanges)
+library(rtracklayer)
+```
+
+
+Acquire gencode mouse files
+
+```{bash}
+#all transcripts
+wget  -O ../fastas/mouse_trans.fa.gz https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M31/gencode.vM31.transcripts.fa.gz
+
+#mouse gff
+wget -O /data2/sangeev/2022_organoid/gff/mouse.gff.gz https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M31/gencode.vM31.annotation.gff3.gz
+
+#mouse genome
+wget -O /data2/sangeev/2022_organoid/fastas/mouse_genome.fa.gz https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M31/GRCm39.genome.fa.gz
+```
+
+### Make the index
+
+Make the kallisto index
+```{bash}
+kallisto index -i ../alignment/kalisto/indices/mouse_trans.kidx -k 19 ../fastas/mouse_trans.fa.gz
+```
+
+
+
+
+

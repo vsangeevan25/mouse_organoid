@@ -1,0 +1,64 @@
+---
+title: "Preparing FASTA and annotation files for RiboViz"
+output:
+  html_notebook:
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+  html_document:
+    toc: yes
+    toc_depth: '4'
+---
+
+## Packages
+```{r, eval=FALSE}
+library(Biostrings)
+library(rtracklayer)
+library(GenomicRanges)
+library(parallel)
+library(rhdf5)
+```
+
+## Mouse datasets
+```{r}
+gff <- readGFFAsGRanges("/data/riboseq/Supp/seqs/mouse/vm14_current/mouse_appris_cdna.gff3")
+fas <- readDNAStringSet("/data/riboseq/Supp/seqs/mouse/vm14_current/mouse_appris_cdna.fa")
+```
+
+```{r}
+gff5 <- resize(gff[gff$type == "UTR5"], width = width(gff[gff$type == "UTR5"])+20)
+gff5 <- gff5[width(gff5) >= 25]
+
+gff3 <- resize(gff[gff$type == "UTR3"], width = width(gff[gff$type == "UTR3"])+20, fix="end")
+gff3 <- gff3[width(gff3) >= 25]
+
+gffm <- gff[gff$type == "CDS"]
+
+
+writeXStringSet(fas[gff5], "/data/riboseq/Supp/seqs/mouse/vm14_current/mouse_appris_utr5_2.fa")
+writeXStringSet(fas[gff3], "/data/riboseq/Supp/seqs/mouse/vm14_current/mouse_appris_utr3_2.fa")
+writeXStringSet(fas[gffm], "/data/riboseq/Supp/seqs/mouse/vm14_current/mouse_appris_onlycds_2.fa")
+```
+
+```{r}
+gffm <- readDNAStringSet("/data/riboseq/Supp/seqs/mouse/vm14_current/mouse_appris_onlycds.fa")
+```
+
+```{r}
+gff5 <- readDNAStringSet("/data/riboseq/Supp/seqs/mouse/vm14_current/mouse_appris_utr5.fa")
+```
+
+```{r}
+gff3 <- readDNAStringSet("/data/riboseq/Supp/seqs/mouse/vm14_current/mouse_appris_utr3.fa")
+
+```
+
+```{r}
+sum(width(gff_cds))
+sum(width(gff_utr5))
+sum(width(gff_utr3))
+
+
+
+```
+
